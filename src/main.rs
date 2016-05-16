@@ -13,9 +13,9 @@ impl Vector {
     fn new() -> Vector {
         Vector {x:0.0, y:0.0, z:0.0}
     }
-    fn scale(&self, s: f32)  -> Vector  { Vector { x:self.x*s, y:self.y*s, z:self.z*s } }
-    fn add(&self, o: Vector) -> Vector  { Vector { x:self.x+o.x, y:self.y+o.y, z:self.z+o.z } }
-    fn sub(&self, o: Vector) -> Vector  { Vector { x:self.x-o.x, y:self.y-o.y, z:self.z-o.z } }
+    fn scale(&self, s: f32)  -> Vector  { Vector { x: self.x*s, y: self.y*s, z: self.z*s } }
+    fn add(&self, o: Vector) -> Vector  { Vector { x: self.x+o.x, y: self.y+o.y, z: self.z+o.z } }
+    fn sub(&self, o: Vector) -> Vector  { Vector { x: self.x-o.x, y: self.y-o.y, z: self.z-o.z } }
     fn dot(&self, o: Vector) -> f32     { self.x*o.x + self.y*o.y + self.z*o.z }
     fn dotself(&self)        -> f32     { self.dot(*self) }
     fn magnitude(&self)      -> f32     { self.dotself().sqrt() }
@@ -41,7 +41,7 @@ struct Color {
 
 impl Color {
     fn scale(&self, s:f32) -> Color {
-        Color { r: self.r*s, g:self.g*s, b:self.b*s }
+        Color { r: self.r*s, g: self.g*s, b: self.b*s }
     }
     fn add(&self, o:Color) -> Color {
         Color { r: self.r + o.r, g: self.g + o.g, b: self.b + o.b }
@@ -59,14 +59,7 @@ struct Light {
     color: Color,
 }
 
-impl Light {
-    fn clamp(x:f32, a:f32, b:f32) -> f32{
-        if x < a { return a;  }
-        if x > b { return b; }
-        return x;
-    }
-}
-
+#[derive(Default)]
 struct Pixel(char);
 
 impl Pixel {
@@ -74,18 +67,21 @@ impl Pixel {
         let col = (color.r + color.g + color.b) / 3.0;
         match CHARMAP.get((col * CHARMAP.len() as f32) as usize) {
             Some(c) => Pixel(*c),
-            None => EMPTY
+            None => Pixel::default()
         }
     }
+
+    fn default() -> Pixel {
+        Pixel(' ')
+    }
 }
-const EMPTY:Pixel = Pixel(' ');
 const CHARMAP: [char; 6] = ['.', '-', '+', '*', 'X', 'M'];
 
 /* -- Displayable objects -- */
 
 trait Displayable {
-    fn collides(&self, Ray) -> Option<(&Displayable, f32)>;
-    fn shade(&self, Ray, f32, Light) -> Color;
+    fn distance(&self, Vector) -> (&Displayable, f32);
+    fn shade(&self, Ray, Vector, &Vec<Box<Light>>) -> Color;
 }
 
 struct Sphere {
@@ -101,30 +97,27 @@ impl Sphere {
 }
 
 impl Displayable for Sphere {
-    fn collides(&self, ray: Ray) -> Option<(&Displayable, f32)> {
-        /* does the ray face the sphere? */
-        let center_dist = self.center.sub(ray.origin);
-        let product = center_dist.dot(ray.vec());
-        if product < 0.0 {
-            return None;
-        }
-        /* is the distance between the ray and the sphere inferior to its radius? */
-        let d2 = center_dist.dotself() - product*product / ray.vec().dotself();
-        let r2 = self.radius*self.radius;
-        if d2 > r2 {
-            return None;
-        }
-        /* then we hit! */
-        return Some((self, d2/r2)) // TODO
+    fn distance(&self, point: Vector) -> (&Displayable, f32) {
+        (self, self.center.sub(point).magnitude() - self.radius)
     }
 
-    fn shade(&self, ray: Ray, dist: f32, light: Light) -> Color {
-        let pi = ray.origin.add(ray.direction.scale(dist));
-        let n = self.get_normal(pi);
-        let lam1 = light.position.sub(pi).normalize().dot(n);
-        let lam2 = Light::clamp(lam1,0.0,1.0);
-        light.color.scale(lam2*0.5).add(self.color.scale(0.3))
+    fn shade(&self, ray: Ray, point: Vector, lights: &Vec<Box<Light>>) -> Color {
+        let mut color = self.color.scale(0.3);
+        for light in lights {
+            let n = self.get_normal(point);
+            let l = clamp(light.position.sub(point).normalize().dot(n), 0.0, 1.0);
+            color = color.add(light.color.scale(l*0.5));
+        }
+        color
     }
+}
+
+/* -- Tools -- */
+
+fn clamp(val: f32, min: f32, max: f32) -> f32{
+    if val < min { return min;  }
+    if val > max { return max; }
+    return val;
 }
 
 /* -- Screen logic -- */
@@ -136,9 +129,13 @@ struct Camera {
     position: Vector
 }
 
+struct Scene {
+    objects: Vec<Box<Displayable>>,
+    lights: Vec<Box<Light>>
+}
+
 impl Camera {
-    fn show<T: Displayable>(&self, scene: &Vec<T>) {
-        let light = Light { position: Vector::new(), color: WHITE };
+    fn show(&self, scene: &Scene) {
         let range = self.range();
         let w:f32 = self.w as f32;
         let h:f32 = self.h as f32;
@@ -149,13 +146,21 @@ impl Camera {
                 let j:f32 = j as f32;
                 let ray = Ray {
                     origin: self.position,
-                    direction: self.position.add(Vector { x: i-w/2.0, y: j-h/2.0, z: range })
+                    direction: Vector { x: i-w/2.0, y: j-h/2.0, z: range }
                 };
 
-                let Pixel(c) = match scene.iter().filter_map(|obj| obj.collides(ray)).next() {
-                    Some((obj, dist)) => Pixel::new(obj.shade(ray, dist, light)),
-                    None => EMPTY
-                };
+                let mut pixel = Pixel::default();
+                let mut point = ray.origin;
+                for step in 0..10 {
+                    let (obj, dist) = Camera::find_nearest(scene, point);
+                    if dist < 0.1 {
+                        pixel = Pixel::new(obj.shade(ray, point, &(scene.lights)));
+                        break;
+                    }
+
+                    point = point.add(ray.direction.scale(dist/ray.direction.magnitude()));
+                }
+                let Pixel(c) = pixel;
                 ncurses::mvaddch(j as i32, i as i32, c as u64);
             }
         }
@@ -164,13 +169,28 @@ impl Camera {
     fn range(&self) -> f32 {
         (self.w as f32 / 2.0) / (self.fov / 180.0 * f32::consts::PI / 2.0).tan()
     }
+
+    fn find_nearest(scene: &Scene, point: Vector) -> (&Displayable, f32) {
+        scene.objects.iter()
+            .map(|obj| obj.distance(point))
+            .fold(None, |min, (obj_a, dist_a)| match min {
+                None => Some((obj_a, dist_a)),
+                Some((obj_b, dist_b)) => Some(if dist_a < dist_b {
+                    (obj_a, dist_a) } else { (obj_b, dist_b) })
+        }).unwrap()
+    }
 }
 
 fn main() {
-    let scene = vec!(
-        Sphere { center: Vector {x: 0.0, y: 0.0, z: 50.0}, radius: 5.0, color: RED },
-        Sphere { center: Vector {x: -20.0, y: 0.0, z: 30.0}, radius: 2.0, color: RED },
-    );
+    let scene = Scene {
+        objects: vec!(
+            Box::new(Sphere { center: Vector {x: 0.0, y: 0.0, z: 50.0}, radius: 5.0, color: RED }),
+            Box::new(Sphere { center: Vector {x: -20.0, y: 0.0, z: 30.0}, radius: 2.0, color: RED }),
+        ),
+        lights: vec!(
+            Box::new(Light { position: Vector {x: -5.0, y: -20.0, z: 10.0}, color: WHITE })
+        )
+    };
 
     /* init ncurses */
     ncurses::initscr();
