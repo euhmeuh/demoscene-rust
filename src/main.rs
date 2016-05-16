@@ -2,7 +2,7 @@ extern crate ncurses;
 
 use std::f32;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 struct Vector {
     x: f32,
     y: f32,
@@ -10,7 +10,7 @@ struct Vector {
 }
 
 impl Vector {
-    fn new() -> Vector {
+    fn default() -> Vector {
         Vector {x:0.0, y:0.0, z:0.0}
     }
     fn scale(&self, s: f32)  -> Vector  { Vector { x: self.x*s, y: self.y*s, z: self.z*s } }
@@ -151,7 +151,7 @@ impl Camera {
 
                 let mut pixel = Pixel::default();
                 let mut point = ray.origin;
-                for step in 0..10 {
+                for _ in 0..10 {
                     let (obj, dist) = Camera::find_nearest(scene, point);
                     if dist < 0.1 {
                         pixel = Pixel::new(obj.shade(ray, point, &(scene.lights)));
@@ -171,13 +171,15 @@ impl Camera {
     }
 
     fn find_nearest(scene: &Scene, point: Vector) -> (&Displayable, f32) {
-        scene.objects.iter()
-            .map(|obj| obj.distance(point))
-            .fold(None, |min, (obj_a, dist_a)| match min {
-                None => Some((obj_a, dist_a)),
-                Some((obj_b, dist_b)) => Some(if dist_a < dist_b {
-                    (obj_a, dist_a) } else { (obj_b, dist_b) })
-        }).unwrap()
+        let mut nearest: Option<(&Displayable, f32)> = None;
+        for (obj, dist) in scene.objects.iter().map(|obj| obj.distance(point)) {
+            nearest = match nearest {
+                None => Some((obj, dist)),
+                Some((obj_last, dist_last)) => Some(if dist_last < dist {
+                    (obj_last, dist_last) } else { (obj, dist) })
+            };
+        }
+        nearest.unwrap()
     }
 }
 
